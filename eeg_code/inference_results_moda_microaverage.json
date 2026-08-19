@@ -1,0 +1,20 @@
+{
+    "total_results": 18577,
+    "f1_score": 82.56526961249132,
+    "precision": 83.6439321165546,
+    "recall": 81.51407351931599,
+    "threshold_iou": 0.2,
+    "evaluations": [
+        1,
+        2,
+        3
+    ],
+    "folds": [
+        1,
+        2,
+        3,
+        4,
+        5
+    ],
+    "microaverage": true
+}
