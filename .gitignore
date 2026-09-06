@@ -77,6 +77,23 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*_executed.ipynb
+
+# Private EEG data and experiment artifacts
+*.h5
+model_weights/
+model_weights_best_original/
+checkpoints/
+predictions/
+runs/
+wandb/
+
+# Local notebook runtime and caches
+.jupyter_config/
+.jupyter_data/
+.jupyter_runtime/
+.ipython/
+.matplotlib_cache/
 
 # IPython
 profile_default/
