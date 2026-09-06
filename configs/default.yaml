@@ -1,0 +1,20 @@
+# Portable defaults. Do not put a personal path here; use --data-root or EEG_DATA_ROOT.
+seed: 42
+data_root: null
+folds_path: eeg_code/data/moda_folds.json
+output_root: outputs
+model: SEEDModel
+training:
+  batch_size: 32
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  epochs: 5
+  num_workers: 0
+  early_stopping_patience: 6
+evaluation:
+  sampling_rate_hz: 200
+  window_seconds: 20
+  stride_seconds: 10
+  detection_threshold: 0.5
+  duration_threshold: 0.425
+  event_iou_threshold: 0.2

@@ -1,5 +1,112 @@
 # Estimación de incertidumbre en redes neuronales aplicada a medicina (EEG)
 
+## Estado del baseline y regla de reproducibilidad
+
+La referencia metodológica es [Tapia-Rivas, Estévez y Cortes-Briones (2024)](https://doi.org/10.1038/s41598-023-50736-7) y la referencia práctica es [`eeg_code/run_model.ipynb`](eeg_code/run_model.ipynb). El nuevo código **no rediseña SEED**: conserva la arquitectura PyTorch, `BCEWithLogitsLoss`, selección por sujeto, stitching, postprocesamiento, pairing, IoU y F1 del notebook. Sólo añade configuración portable, exportación y análisis post-hoc.
+
+Antes de comparar números, leer [`docs/seed_baseline_reference.md`](docs/seed_baseline_reference.md): el artículo y el notebook no son idénticos en todos sus detalles (por ejemplo, contexto de bordes y máximo de duración). Para reproducir el valor histórico de este repositorio, manda el notebook legacy.
+
+La arquitectura concreta preservada está descrita en [`docs/seed_architecture.md`](docs/seed_architecture.md); el dominio médico y el protocolo de eventos, en [`docs/medical_domain.md`](docs/medical_domain.md).
+
+## Dataset location
+
+Los datos privados no se versionan ni deben copiarse dentro del repositorio. Cada colaborador configura una única carpeta externa:
+
+```text
+<EEG_DATA_ROOT>/
+├── moda_augmented_s5.h5          # entrenamiento nuevo
+├── moda_moda.h5                  # inferencia baseline legacy
+├── model_weights/                # pesos entrenados localmente, opcional
+└── model_weights_best_original/  # checkpoints legacy para reproducir baseline
+```
+
+Los folds sí son pequeños y versionados en `eeg_code/data/moda_folds.json`. Configura la raíz por comando o variable de entorno:
+
+```bash
+# Linux
+export EEG_DATA_ROOT=/mnt/eeg_private_data
+
+# Windows PowerShell
+$env:EEG_DATA_ROOT = 'D:\eeg_private_data'
+
+# Siempre se puede pasar explícitamente
+python scripts/eda.py --data-root /ruta/al/eeg_private_data
+```
+
+Cada CLI valida archivos y rutas antes de abrir HDF5. No existen rutas personales hardcodeadas en el pipeline nuevo. El notebook legacy se conserva sin cambios y aún espera sus paths relativos; usar las CLIs nuevas para trabajo reproducible.
+
+## Setup for collaborators
+
+```bash
+git clone https://github.com/fernandoquinterob1-byte/t3-el7006-2026.git
+cd t3-el7006-2026
+python -m venv .venv
+source .venv/bin/activate             # Windows: .venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+cp .env.example .env                  # editar sólo de forma local, si se desea
+```
+
+`requirements.txt` raíz es la lista portable del pipeline nuevo. El archivo histórico `eeg_code/requirements.txt` es un volcado del entorno del notebook y no es el instalador recomendado.
+
+## First uncertainty experiment
+
+Los índices de CLI son **cero-based**: `--evaluation 0 --fold 0` equivale a `eval_1/fold_1` del JSON legacy. Los IDs internos nunca se aplanan: hay 3 evaluaciones × 5 folds.
+
+```bash
+# 1. Auditoría y EDA (agregar --include-raw y --plot-examples 2 sólo si se desea)
+python scripts/eda.py --data-root "$EEG_DATA_ROOT"
+
+# 2. Smoke test del pipeline de entrenamiento, sin evaluación legacy completa
+python train.py --evaluation 0 --fold 0 --debug --data-root "$EEG_DATA_ROOT"
+
+# 3. Verificación de memorización/debug de N ventanas
+python train.py --evaluation 0 --fold 0 --overfit-small-subset 64 --epochs 20 --data-root "$EEG_DATA_ROOT"
+
+# 4. Entrenar un modelo nuevo de un fold; W&B es opcional
+python train.py --evaluation 0 --fold 0 --data-root "$EEG_DATA_ROOT" --logger none
+python train.py --evaluation 0 --fold 0 --data-root "$EEG_DATA_ROOT" --logger wandb
+
+# 5. Reproducir un fold con checkpoints legacy y guardar logits/probabilidades/eventos
+python evaluate_baseline.py --evaluation 0 --fold 0 --data-root "$EEG_DATA_ROOT" --device cuda
+
+# 6. Reproducir el microaverage histórico de los 15 pares (trabajo pesado)
+python evaluate_baseline.py --data-root "$EEG_DATA_ROOT" --device cuda
+
+# 7. Entropía/confianza binaria post-hoc
+python analyze_uncertainty.py --predictions outputs/baseline/predictions_legacy_eval_1_fold_1.npz
+```
+
+Para W&B, instalar dependencias, ejecutar `wandb login` sólo en el equipo que lo usará y pasar `--logger wandb`. Con `--logger none` no se importa ni conecta W&B.
+
+`--overfit-small-subset N` es deliberadamente un diagnóstico: evalúa el mismo subconjunto de entrenamiento, por lo que sus métricas no son métricas de validación ni deben reportarse como resultado experimental.
+
+### Convención de índices y outputs
+
+El JSON, los checkpoints y el evaluador interno usan `eval_1..eval_3` y `fold_1..fold_5` (**uno-based**). Todas las CLIs públicas usan `--evaluation 0..2 --fold 0..4` (**cero-based**), por lo que `0/0` siempre selecciona internamente `eval_1/fold_1`.
+
+- `train.py` escribe `outputs/train_eval_0_fold_0_seed_42/predictions.npz`: sus campos `evaluation` y `fold` son cero-based.
+- `evaluate_baseline.py` escribe `outputs/baseline/predictions_legacy_eval_1_fold_1.npz`: sus campos `legacy_evaluation` y `legacy_fold` son uno-based e incluye los campos `cli_*_zero_based` equivalentes.
+
+Los NPZ no usan arrays `object`. Para un conjunto de `N` filas HDF5 y longitud temporal `T`, los outputs principales tienen shape `(N, T)`: `y_true` (`int8`), `logits` (`float32`), `probabilities` (`float32`), `y_pred` (`int8`) y `processed_pred` (`int8`, sólo baseline). `sample_id` tiene shape `(N,)`; `subject_id`, shape `(N,)` Unicode. Los eventos se guardan como arrays planos paralelos `(E,)` (`event_*`), no como listas de Python.
+
+Guardar logits y probabilidades duplica aproximadamente 8 bytes por timestep. Un fold de entrenamiento MODA aumentado de aproximadamente 2 988 ventanas × 4 000 timesteps ocupa cerca de 114 MiB sin compresión para estas cinco matrices; un fold baseline sin aumento es menor. `np.savez_compressed` ya aplica compresión sin pérdida, pero logits suelen comprimir poco. Para corridas masivas, la solución sin pérdida recomendada es conservar `logits` float32 y derivar `probabilities = sigmoid(logits)` al analizar; por ahora se guardan ambos por claridad y para cumplir el MVP.
+
+La CV no se ejecuta sola: cuando corresponda, lanzar explícitamente `python run_cv.py --evaluations 0 1 2 --folds 0 1 2 3 4 --data-root "$EEG_DATA_ROOT" --extra --device cuda`.
+
+## Estructura y colaboración Git
+
+```text
+configs/         defaults versionados; local.yaml está ignorado
+docs/            teoría, dominio médico y contraste de referencia
+src/eeg_uq/      data, modelo, folds, evaluación, entrenamiento e incertidumbre
+scripts/         EDA explícita
+tests/           pruebas sintéticas sin GPU
+outputs/         resultados locales, ignorados
+eeg_code/        notebook legacy y sus metadatos/diagramas de referencia
+```
+
+Se ignoran datasets HDF5, pesos, `outputs/`, W&B, logs, caches y configuraciones locales. No se ignoran código, documentación, folds ni configuraciones reproducibles. Flujo recomendado: actualizar `main`, crear `feature/nombre`, hacer cambios pequeños, `git add`, `git commit`, `git push -u origin feature/nombre` y abrir PR. Evitar editar simultáneamente notebooks; la lógica nueva debe vivir en `src/` y las CLIs.
+
 **Uncertainty on EEG**
 
 **Guías:** Sebastián Guzmán

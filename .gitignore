@@ -87,6 +87,14 @@ checkpoints/
 predictions/
 runs/
 wandb/
+outputs/
+mlruns/
+tensorboard/
+events.out.tfevents*
+*.pt
+*.pth
+configs/local.yaml
+.DS_Store
 
 # Local notebook runtime and caches
 .jupyter_config/

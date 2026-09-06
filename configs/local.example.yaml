@@ -1,0 +1,2 @@
+# Copy to configs/local.yaml (ignored by Git) only if you prefer a local path.
+data_root: /absolute/path/to/eeg_private_data

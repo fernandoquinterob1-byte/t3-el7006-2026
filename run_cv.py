@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Sequentially launch selected new-training SEED folds (never runs by itself)."""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--evaluations", nargs="+", type=int, default=[0], choices=range(3))
+    parser.add_argument("--folds", nargs="+", type=int, default=[0], choices=range(5))
+    parser.add_argument("--data-root", required=True)
+    parser.add_argument("--extra", nargs=argparse.REMAINDER, help="Extra arguments forwarded to train.py.")
+    args = parser.parse_args()
+    for evaluation in args.evaluations:
+        for fold in args.folds:
+            command = [sys.executable, str(REPO_ROOT / "train.py"), "--evaluation", str(evaluation), "--fold", str(fold), "--data-root", args.data_root]
+            if args.extra:
+                command.extend(args.extra)
+            print("Launching:", " ".join(command))
+            subprocess.run(command, check=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,10 @@
+# Portable runtime requirements for the modular pipeline.
+# Install an appropriate PyTorch build for your CPU/CUDA platform first if needed.
+numpy>=1.26
+torch>=2.2
+h5py>=3.10
+scikit-learn>=1.4
+PyYAML>=6.0
+matplotlib>=3.8
+wandb>=0.17
+pytest>=8.0
