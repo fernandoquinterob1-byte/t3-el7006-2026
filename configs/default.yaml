@@ -1,20 +1,121 @@
-# Portable defaults. Do not put a personal path here; use --data-root or EEG_DATA_ROOT.
+# Single source of experiment defaults. Personal paths stay on the CLI or in
+# EEG_DATA_ROOT; this file is versioned and copied into every run directory.
 seed: 42
-data_root: null
-folds_path: eeg_code/data/moda_folds.json
 output_root: outputs
-model: SEEDModel
+paths:
+  # Set these in YAML for a reproducible run, or leave null to use CLI/env.
+  data_root: null
+  folds_path: null
 training:
-  batch_size: 32
+  batch_size: 8
   learning_rate: 0.0001
   weight_decay: 0.0001
-  epochs: 5
-  num_workers: 0
-  early_stopping_patience: 6
-evaluation:
-  sampling_rate_hz: 200
-  window_seconds: 20
-  stride_seconds: 10
+  epochs: 50             # maximum; early stopping normally ends earlier
+  num_workers: 2
+  early_stopping_patience: 5
+  device: auto
+  logger: none
+  export_validation_and_test: true
+neural_process:
+  # Uses the corresponding saved SEED best_full.pt as a frozen backbone.
+  output_root: outputs/neural_process
+  seed_run_root: outputs/seed_batch8_earlystop
+  model_kind: attn_lnp
+  batch_size: 8
+  learning_rate: 0.001
+  epochs: 50
+  context_fraction: 0.25
+  r_dim: 64
+  z_dim: 64
+  latent_samples_train: 1
+  latent_samples_test: 16
+  export_validation_and_test: true
+conformal:
+  alpha: 0.05
+  alpha_sweep: [0.01, 0.05, 0.10, 0.20]
+  rejection_thresholds: [0.10, 0.25, 0.50]
+  calibration_split: validation
+  test_split: test
+  event_probability_percentile: 75
+laplace:
+  # Zero-based public indices. Run only these pairs when no CLI override is used.
+  evaluations: [0]
+  folds: [0]
+  seed_run_root: outputs/seed_batch8_earlystop
+  checkpoint_template: "{seed_run_root}/train_eval_{evaluation}_fold_{fold}_seed_{seed}/checkpoints/best_full.pt"
+  output_root: outputs/laplace_redux
+  likelihood: classification
+  subset_of_weights: last_layer
+  hessian_structure: diag
+  # Fitted on raw train records at SEED's reduced rate (no x8 repeats, no
+  # augmented copies). `auto` tempers the likelihood by the integrated
+  # autocorrelation time of the SEED logit, i.e. N / tau effective points.
+  temperature: auto
+  device: auto
+  prior_precision: 1.0  # starting value; tuned on validation NLL below
+  mc_samples: 30
+  random_seed: 12345
+  progress_bar: true
+  inference:
+    sample_rate_hz: 200
+    window_seconds: 20
+    stride_seconds: 10
+    detection_threshold: 0.5
+    duration_threshold: 0.425
+  prior_tuning:
+    enabled: true
+    method: gridsearch
+    steps: 25
+    learning_rate: 0.1
+    grid_size: 15
+    log_min: -4.0
+    log_max: 4.0
+temporal_ensemble:
+  # Phase-shift members on the frozen SEED checkpoint; no training.
+  evaluations: [0]
+  folds: [0, 1, 2, 3, 4]
+  seed_run_root: outputs/seed_batch8_earlystop
+  checkpoint_template: "{seed_run_root}/train_eval_{evaluation}_fold_{fold}_seed_{seed}/checkpoints/best_full.pt"
+  output_root: outputs/temporal_ensemble
+  device: auto
+  # Samples added to the record start. Non-multiples of SEED's x8 downsampling
+  # change its internal pooling; whole-second shifts inside the central half of
+  # a window barely change the prediction (see docs/temporal_ensemble.md).
+  phase_shifts: [0, 1, 2, 3, 4, 5, 6, 7]
+  inference:
+    sample_rate_hz: 200
+    window_seconds: 20
+    stride_seconds: 10
+    detection_threshold: 0.5
+    duration_threshold: 0.425
+mc_dropout:
+  # SEED's dropout layers stay active at prediction time; no training.
+  evaluations: [0]
+  folds: [0, 1, 2, 3, 4]
+  seed_run_root: outputs/seed_batch8_earlystop
+  checkpoint_template: "{seed_run_root}/train_eval_{evaluation}_fold_{fold}_seed_{seed}/checkpoints/best_full.pt"
+  output_root: outputs/mc_dropout
+  device: auto
+  n_samples: 30
+  # bilstm_input (p=0.2), bilstm_internal (p=0.5, between LSTM layers), classifier (p=0.5)
+  groups: [bilstm_input, bilstm_internal, classifier]
+  random_seed: 12345
+  inference:
+    sample_rate_hz: 200
+    window_seconds: 20
+    stride_seconds: 10
+    detection_threshold: 0.5
+    duration_threshold: 0.425
+deep_ensemble:
+  # Independent SEED trainings (train.py) that differ only in the seed.
+  evaluations: [0]
+  folds: [0, 1, 2, 3, 4]
+  seeds: [42, 1, 2, 3, 4]   # 42 is the existing baseline run
+  seed_run_root: outputs/seed_batch8_earlystop
+  output_root: outputs/deep_ensemble
   detection_threshold: 0.5
   duration_threshold: 0.425
-  event_iou_threshold: 0.2
+uncertainty:
+  epsilon: 0.000001
+  ece_bins: 15
+  save_predictive_samples: true

@@ -9,6 +9,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
+from collections.abc import Callable
 
 from .folds import get_fold, load_folds, validate_folds
 from .metrics import (
@@ -107,6 +108,96 @@ def infer_full_signal_logits(model: SEEDModel, signal: np.ndarray, device: torch
     return logits.astype(np.float32, copy=False)
 
 
+def predict_raw_records(
+    *,
+    data_path: str | Path,
+    model: SEEDModel,
+    sample_ids: np.ndarray,
+    device: torch.device,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, np.ndarray | str]:
+    """Apply the established full-signal SEED inference to selected raw records.
+
+    This is intentionally the one shared implementation of window stitching,
+    legacy thresholds, post-processing and event extraction.  It is used by
+    both the frozen legacy evaluator and exports from newly trained models.
+    """
+    sample_ids = np.asarray(sample_ids, dtype=np.int64)
+    logits_values, true_values, predicted_values, processed_values, mask_values = [], [], [], [], []
+    iou_values: list[float] = []
+    event_sample_ids, event_subject_ids, event_truth_start, event_truth_end = [], [], [], []
+    event_prediction_start, event_prediction_end, event_status, event_duration_samples = [], [], [], []
+    offsets = [0]
+    with h5py.File(data_path, "r") as source:
+        raw_subject_ids = np.asarray(source["subject_ids"][:])
+        decoded_subject_ids = np.asarray(
+            [value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in raw_subject_ids]
+        )
+        mask_key = next(
+            (candidate for candidate in ("valid_mask", "annotation_mask") if candidate in source), None
+        )
+        for position, sample_id in enumerate(sample_ids, start=1):
+            signal = np.asarray(source["signals"][sample_id], dtype=np.float32)
+            labels = np.asarray(source["labels"][sample_id], dtype=np.int8)
+            logits = infer_full_signal_logits(model, signal, device)
+            probabilities = 1.0 / (1.0 + np.exp(-logits))
+            prediction = (probabilities >= DETECTION_THRESHOLD).astype(np.int8)
+            duration_prediction = (probabilities >= DURATION_THRESHOLD).astype(np.int8)
+            processed = process_spindle_simple(prediction, duration_prediction).astype(np.int8)
+            valid_mask = (
+                np.asarray(source[mask_key][sample_id], dtype=np.uint8)
+                if mask_key is not None
+                else np.ones(labels.shape, dtype=np.uint8)
+            )
+            if valid_mask.shape != labels.shape:
+                raise ValueError(
+                    f"{mask_key} shape {valid_mask.shape} does not match labels {labels.shape}."
+                )
+            event_ious = get_results_simple(labels.astype(int), processed.astype(int))
+            event_records = legacy_event_records(labels.astype(int), processed.astype(int))
+            logits_values.append(logits)
+            true_values.append(labels)
+            predicted_values.append(prediction)
+            processed_values.append(processed)
+            mask_values.append(valid_mask)
+            iou_values.extend(event_ious)
+            event_sample_ids.extend([int(sample_id)] * len(event_records))
+            event_subject_ids.extend([decoded_subject_ids[sample_id]] * len(event_records))
+            event_truth_start.extend(record["true_start"] for record in event_records)
+            event_truth_end.extend(record["true_end"] for record in event_records)
+            event_prediction_start.extend(record["pred_start"] for record in event_records)
+            event_prediction_end.extend(record["pred_end"] for record in event_records)
+            event_status.extend(record["status"] for record in event_records)
+            event_duration_samples.extend(
+                max(0, record["pred_end"] - record["pred_start"]) for record in event_records
+            )
+            offsets.append(len(iou_values))
+            if progress is not None:
+                progress(position, len(sample_ids))
+    logits_array = np.stack(logits_values).astype(np.float32)
+    return {
+        "sample_ids": sample_ids,
+        "subject_ids": decoded_subject_ids[sample_ids].astype("U"),
+        "y_true": np.stack(true_values).astype(np.int8),
+        "logits": logits_array,
+        "probabilities": (1.0 / (1.0 + np.exp(-logits_array))).astype(np.float32),
+        "y_pred": np.stack(predicted_values).astype(np.int8),
+        "processed_pred": np.stack(processed_values).astype(np.int8),
+        "valid_mask": np.stack(mask_values).astype(np.uint8),
+        "event_iou_values": np.asarray(iou_values, dtype=np.float32),
+        "event_iou_offsets": np.asarray(offsets, dtype=np.int64),
+        "event_sample_id": np.asarray(event_sample_ids, dtype=np.int64),
+        "event_subject_id": np.asarray(event_subject_ids, dtype="U"),
+        "event_true_start": np.asarray(event_truth_start, dtype=np.int64),
+        "event_true_end": np.asarray(event_truth_end, dtype=np.int64),
+        "event_pred_start": np.asarray(event_prediction_start, dtype=np.int64),
+        "event_pred_end": np.asarray(event_prediction_end, dtype=np.int64),
+        "event_status": np.asarray(event_status, dtype="U16"),
+        "event_duration_samples": np.asarray(event_duration_samples, dtype=np.int64),
+        "mask_source": mask_key or "all_timesteps (no HDF5 mask)",
+    }
+
+
 def evaluate_fold(
     data_path: str | Path,
     weights_dir: str | Path,
@@ -125,57 +216,20 @@ def evaluate_fold(
         if not len(test_indices):
             raise ValueError(f"No records found for eval {evaluation}, fold {fold} test subjects.")
         model = load_legacy_checkpoint(weights_dir, evaluation, fold, device_obj)
-        logits_values, true_values, predicted_values, processed_values, iou_values = [], [], [], [], []
-        event_sample_ids, event_subject_ids, event_truth_start, event_truth_end = [], [], [], []
-        event_prediction_start, event_prediction_end, event_status, event_duration_samples = [], [], [], []
-        offsets = [0]
-        for sample_id in test_indices:
-            signal = source["signals"][sample_id].astype(np.float32)
-            labels = source["labels"][sample_id].astype(np.int8)
-            logits = infer_full_signal_logits(model, signal, device_obj)
-            probabilities = 1.0 / (1.0 + np.exp(-logits))
-            prediction = (probabilities >= DETECTION_THRESHOLD).astype(np.int8)
-            duration_prediction = (probabilities >= DURATION_THRESHOLD).astype(np.int8)
-            processed = process_spindle_simple(prediction, duration_prediction).astype(np.int8)
-            event_ious = get_results_simple(labels.astype(int), processed)
-            event_records = legacy_event_records(labels.astype(int), processed)
-            logits_values.append(logits)
-            true_values.append(labels)
-            predicted_values.append(prediction)
-            processed_values.append(processed)
-            iou_values.extend(event_ious)
-            event_sample_ids.extend([int(sample_id)] * len(event_records))
-            event_subject_ids.extend([decoded_subject_ids[sample_id]] * len(event_records))
-            event_truth_start.extend(record["true_start"] for record in event_records)
-            event_truth_end.extend(record["true_end"] for record in event_records)
-            event_prediction_start.extend(record["pred_start"] for record in event_records)
-            event_prediction_end.extend(record["pred_end"] for record in event_records)
-            event_status.extend(record["status"] for record in event_records)
-            event_duration_samples.extend(
-                max(0, record["pred_end"] - record["pred_start"]) for record in event_records
-            )
-            offsets.append(len(iou_values))
-    logits_array = np.stack(logits_values)
+    exported = predict_raw_records(
+        data_path=data_path, model=model, sample_ids=test_indices, device=device_obj
+    )
     return FoldPredictions(
         evaluation=evaluation,
         fold=fold,
-        sample_ids=test_indices.astype(np.int64),
-        subject_ids=decoded_subject_ids[test_indices].astype("U"),
-        y_true=np.stack(true_values).astype(np.int8),
-        logits=logits_array,
-        probabilities=(1.0 / (1.0 + np.exp(-logits_array))).astype(np.float32),
-        y_pred=np.stack(predicted_values).astype(np.int8),
-        processed_pred=np.stack(processed_values).astype(np.int8),
-        event_iou_values=np.asarray(iou_values, dtype=np.float32),
-        event_iou_offsets=np.asarray(offsets, dtype=np.int64),
-        event_sample_id=np.asarray(event_sample_ids, dtype=np.int64),
-        event_subject_id=np.asarray(event_subject_ids, dtype="U"),
-        event_true_start=np.asarray(event_truth_start, dtype=np.int64),
-        event_true_end=np.asarray(event_truth_end, dtype=np.int64),
-        event_pred_start=np.asarray(event_prediction_start, dtype=np.int64),
-        event_pred_end=np.asarray(event_prediction_end, dtype=np.int64),
-        event_status=np.asarray(event_status, dtype="U16"),
-        event_duration_samples=np.asarray(event_duration_samples, dtype=np.int64),
+        sample_ids=exported["sample_ids"], subject_ids=exported["subject_ids"],
+        y_true=exported["y_true"], logits=exported["logits"], probabilities=exported["probabilities"],
+        y_pred=exported["y_pred"], processed_pred=exported["processed_pred"],
+        event_iou_values=exported["event_iou_values"], event_iou_offsets=exported["event_iou_offsets"],
+        event_sample_id=exported["event_sample_id"], event_subject_id=exported["event_subject_id"],
+        event_true_start=exported["event_true_start"], event_true_end=exported["event_true_end"],
+        event_pred_start=exported["event_pred_start"], event_pred_end=exported["event_pred_end"],
+        event_status=exported["event_status"], event_duration_samples=exported["event_duration_samples"],
     )
 
 

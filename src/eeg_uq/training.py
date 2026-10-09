@@ -26,17 +26,17 @@ from .model import SEEDModel
 class TrainConfig:
     evaluation: int  # zero-based external index
     fold: int  # zero-based external index
-    seed: int = 42
-    batch_size: int = 32
-    learning_rate: float = 1e-4
-    weight_decay: float = 1e-4
-    epochs: int = 5
-    num_workers: int = 0
-    early_stopping_patience: int = 6
-    device: str = "auto"
+    seed: int
+    batch_size: int
+    learning_rate: float
+    weight_decay: float
+    epochs: int
+    num_workers: int
+    early_stopping_patience: int
+    device: str
+    logger: str
     debug: bool = False
     overfit_small_subset: int | None = None
-    logger: str = "none"
 
 
 def set_seed(seed: int) -> None:
@@ -106,31 +106,6 @@ def _run_epoch(model: SEEDModel, loader: DataLoader, optimizer, device: torch.de
     return float(np.mean(losses)), _metrics_from_logits(np.concatenate(logits_parts), np.concatenate(target_parts))
 
 
-@torch.no_grad()
-def export_window_predictions(model: SEEDModel, loader: DataLoader, device: torch.device, output_path: Path, metadata: dict) -> None:
-    """Export dense binary temporal predictions for the validation split."""
-    model.eval()
-    ids, subjects, targets, logits_values = [], [], [], []
-    for batch in loader:
-        logits = model(batch["signal"].to(device)).cpu().numpy().astype(np.float32)
-        ids.append(batch["sample_id"].numpy())
-        subjects.append(np.asarray(batch["subject_id"], dtype="U"))
-        targets.append(batch["target"].numpy().astype(np.int8))
-        logits_values.append(logits)
-    logits = np.concatenate(logits_values)
-    probability = 1 / (1 + np.exp(-logits))
-    np.savez_compressed(
-        output_path,
-        sample_id=np.concatenate(ids),
-        subject_id=np.concatenate(subjects),
-        y_true=np.concatenate(targets),
-        logits=logits,
-        probabilities=probability.astype(np.float32),
-        y_pred=(probability >= 0.5).astype(np.int8),
-        **{key: np.asarray(value) for key, value in metadata.items()},
-    )
-
-
 def train_one_fold(
     config: TrainConfig,
     *,
@@ -156,7 +131,8 @@ def train_one_fold(
     val_loader = DataLoader(val_data, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers)
     model = SEEDModel().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    best_loss, stale_epochs, history = float("inf"), 0, []
+    best_loss, best_epoch, stale_epochs, history = float("inf"), 0, 0, []
+    stopped_early = False
     run = None
     if config.logger == "wandb":
         try:
@@ -173,7 +149,7 @@ def train_one_fold(
         if run:
             run.log(record, step=epoch)
         if val_loss < best_loss:
-            best_loss, stale_epochs = val_loss, 0
+            best_loss, best_epoch, stale_epochs = val_loss, epoch, 0
             torch.save(model.embedding.state_dict(), checkpoints / "embedding_best.pth")
             torch.save(model.transformer.state_dict(), checkpoints / "lstm_best.pth")
             torch.save(model.classifier.state_dict(), checkpoints / "classifier_best.pth")
@@ -181,17 +157,23 @@ def train_one_fold(
         else:
             stale_epochs += 1
             if stale_epochs >= config.early_stopping_patience:
+                stopped_early = True
                 break
     torch.save(model.state_dict(), checkpoints / "final_full.pt")
     model.load_state_dict(torch.load(checkpoints / "best_full.pt", map_location=device, weights_only=True)["model_state"])
-    metadata = {
-        "evaluation": config.evaluation,
-        "fold": config.fold,
-        "seed": config.seed,
-        "split": "overfit_train_subset" if subset is not None else "validation",
+    summary = {
+        "config": asdict(config),
+        "git_commit": git_commit(),
+        "device": str(device),
+        "best_val_loss": best_loss,
+        "best_epoch": best_epoch,
+        "epochs_completed": len(history),
+        "stopped_early": stopped_early,
+        "history": history,
+        "train_records": len(train_data),
+        "validation_records": len(val_data),
+        "overfit_mode_uses_training_subset_for_evaluation": subset is not None,
     }
-    export_window_predictions(model, val_loader, device, output_dir / "predictions.npz", metadata)
-    summary = {"config": asdict(config), "git_commit": git_commit(), "device": str(device), "best_val_loss": best_loss, "epochs_completed": len(history), "history": history, "train_records": len(train_data), "validation_records": len(val_data), "overfit_mode_uses_training_subset_for_evaluation": subset is not None}
     (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2))
     (output_dir / "config.json").write_text(json.dumps({**asdict(config), "git_commit": git_commit()}, indent=2))
     if run:

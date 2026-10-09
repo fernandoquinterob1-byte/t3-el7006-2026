@@ -241,3 +241,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Upstream Neural Process Family checkout (see third_party/README.md to recreate it)
+third_party/Neural-Process-Family/

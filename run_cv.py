@@ -16,11 +16,26 @@ def main() -> None:
     parser.add_argument("--evaluations", nargs="+", type=int, default=[0], choices=range(3))
     parser.add_argument("--folds", nargs="+", type=int, default=[0], choices=range(5))
     parser.add_argument("--data-root", required=True)
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml")
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--extra", nargs=argparse.REMAINDER, help="Extra arguments forwarded to train.py.")
     args = parser.parse_args()
     for evaluation in args.evaluations:
         for fold in args.folds:
-            command = [sys.executable, str(REPO_ROOT / "train.py"), "--evaluation", str(evaluation), "--fold", str(fold), "--data-root", args.data_root]
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "train.py"),
+                "--evaluation",
+                str(evaluation),
+                "--fold",
+                str(fold),
+                "--data-root",
+                args.data_root,
+                "--config",
+                str(args.config),
+            ]
+            if args.output_root:
+                command.extend(["--output-root", str(args.output_root)])
             if args.extra:
                 command.extend(args.extra)
             print("Launching:", " ".join(command))
