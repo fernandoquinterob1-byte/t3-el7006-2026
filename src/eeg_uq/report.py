@@ -32,9 +32,12 @@ from .metrics import SAMPLE_RATE_HZ, calculate_metrics_simple
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT = REPO_ROOT / "outputs"
 CACHE = OUT / "results_reports" / "analysis"
-CACHE_VERSION = 1
-EVALUATIONS = (0, 1)
+CACHE_VERSION = 2
 FOLDS = range(5)
+EVALUATIONS = (0, 1, 2)
+MEAN_SCOPE = "Promedio eval " + ", ".join(map(str, EVALUATIONS[:-1])) + f" y {EVALUATIONS[-1]}"
+SCOPES = [f"Evaluación {e}" for e in EVALUATIONS] + [MEAN_SCOPE]
+N_FOLDS_TOTAL = len(EVALUATIONS) * len(FOLDS)
 NEAR = SAMPLE_RATE_HZ  # ±1 s around true or predicted events
 BORDER = SAMPLE_RATE_HZ // 4  # ±0.25 s around true onsets/offsets
 ROC_GRID = np.linspace(0.0, 1.0, 201)
@@ -57,6 +60,7 @@ COLORS = {
 }
 GROUP_COLORS = {"TP (predicho)": "#2a78d6", "FP (predicho)": "#eb6834", "TP (real)": "#7fb3ec", "FN (real)": "#e34948"}
 CHANCE = "#52514e"
+SCOPE_COLORS = dict(zip(SCOPES, ("#b9d6f5", "#7fb3ec", "#2a78d6", "#1f4e8c")))
 
 
 def method_path(method: str, evaluation: int, fold: int, split: str = "test") -> Path:
@@ -237,7 +241,7 @@ def method_info(method: str) -> pd.DataFrame | None:
 
 
 def method_results(method: str, refresh: bool = False) -> dict[str, pd.DataFrame]:
-    """All analyses of one method for evaluations 0 and 1 (cached)."""
+    """All analyses of one method for every evaluation (cached)."""
     cache = CACHE / f"{method.lower().replace(' ', '_')}.pkl"
     if cache.is_file() and not refresh:
         with cache.open("rb") as handle:
@@ -259,14 +263,14 @@ def method_results(method: str, refresh: bool = False) -> dict[str, pd.DataFrame
 
 
 def by_evaluation(table: pd.DataFrame, columns: list[str] | None = None) -> pd.DataFrame:
-    """Mean ± std per evaluation and for both evaluations together (10 folds)."""
+    """Mean ± std per evaluation and for all evaluations together."""
     columns = columns or [c for c in table.columns if c not in ("evaluación", "fold")]
     blocks = {}
     for evaluation in EVALUATIONS:
         part = table[table["evaluación"] == evaluation][columns]
         blocks[f"eval {evaluation}"] = part.mean().map("{:.4g}".format) + " ± " + part.std().map("{:.2g}".format)
     both = table[columns]
-    blocks["promedio eval 0 y 1"] = both.mean().map("{:.4g}".format) + " ± " + both.std().map("{:.2g}".format)
+    blocks[MEAN_SCOPE.lower()] = both.mean().map("{:.4g}".format) + " ± " + both.std().map("{:.2g}".format)
     return pd.DataFrame(blocks).replace("nan ± nan", "—")
 
 
@@ -297,7 +301,7 @@ def event_medians(events: pd.DataFrame) -> pd.DataFrame:
     measures = [m for m in ("probabilidad media", "incertidumbre total", "aleatoria", "epistémica (MI)",
                             "dispersión entre muestras (std)") if events[m].notna().any()]
     blocks = {}
-    for label, part in [(f"eval {e}", events[events["evaluación"] == e]) for e in EVALUATIONS] + [("promedio eval 0 y 1", events)]:
+    for label, part in [(f"eval {e}", events[events["evaluación"] == e]) for e in EVALUATIONS] + [(MEAN_SCOPE.lower(), events)]:
         medians = part.groupby("grupo")[measures].median().loc[GROUPS]
         medians.columns = pd.MultiIndex.from_product([[label], medians.columns])
         blocks[label] = medians
@@ -306,14 +310,14 @@ def event_medians(events: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- plots
 
-def _panels(title, ncols=3, width=5.2, height=4.4, sharey=True):
+def _panels(title, ncols=len(SCOPES), width=5.2, height=4.4, sharey=True):
     fig, axes = plt.subplots(1, ncols, figsize=(width * ncols, height), sharey=sharey, constrained_layout=True)
     fig.suptitle(title)
     return fig, np.atleast_1d(axes)
 
 
 def _scopes(table):
-    return [(f"Evaluación {e}", table[table["evaluación"] == e]) for e in EVALUATIONS] + [("Promedio eval 0 y 1", table)]
+    return [(f"Evaluación {e}", table[table["evaluación"] == e]) for e in EVALUATIONS] + [(MEAN_SCOPE, table)]
 
 
 def plot_roc(results, method):
@@ -383,14 +387,15 @@ def plot_error_detection(results, method):
     metrics = results["metrics"]
     names = ["SEED H(p)"] if method == "SEED" else [n for n in ("SEED H(p)", "total", "aleatoria", "MI") if f"AUROC errores: {n}" in metrics]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6), constrained_layout=True)
-    fig.suptitle(f"{method}: detección de errores cerca de eventos (barra = ± desv. est. de los 10 folds)")
-    width = 0.26
+    fig.suptitle(f"{method}: detección de errores cerca de eventos (barra = ± desv. est. de los {N_FOLDS_TOTAL} folds)")
+    width = 0.8 / len(SCOPES)
     for ax, kind in zip(axes, ("AUROC", "AUPRC")):
-        for offset, (label, part) in zip((-width, 0, width), _scopes(metrics)):
+        for i, (label, part) in enumerate(_scopes(metrics)):
+            offset = (i - (len(SCOPES) - 1) / 2) * width
             means = [part[f"{kind} errores: {n}"].mean() for n in names]
             stds = [part[f"{kind} errores: {n}"].std() for n in names]
             ax.bar(np.arange(len(names)) + offset, means, width, yerr=stds, capsize=3, label=label,
-                   color={"Evaluación 0": "#7fb3ec", "Evaluación 1": "#2a78d6", "Promedio eval 0 y 1": "#1f4e8c"}[label])
+                   color=SCOPE_COLORS[label])
         chance = 0.5 if kind == "AUROC" else metrics["azar errores"].mean()
         ax.axhline(chance, ls="--", color=CHANCE, lw=1, label=f"azar ({chance:.2f})")
         ax.set_xticks(range(len(names)), names)
@@ -512,7 +517,7 @@ def plot_rejection(results, method):
 # ---------------------------------------------------------------- conformal
 
 def conformal_results(alphas=(0.01, 0.05, 0.10, 0.20)) -> pd.DataFrame:
-    """Split conformal on SEED, per class, for evaluations 0 and 1."""
+    """Split conformal on SEED, per class, for every evaluation."""
     from .uncertainty.conformal import build_prediction_sets, compute_nonconformity_scores, fit_conformal_threshold
 
     rows = []
@@ -535,7 +540,6 @@ def conformal_results(alphas=(0.01, 0.05, 0.10, 0.20)) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- comparison
 
-SCOPES = ["Evaluación 0", "Evaluación 1", "Promedio eval 0 y 1"]
 
 
 def comparison_table(all_results: dict[str, dict]) -> pd.DataFrame:
@@ -559,7 +563,7 @@ def comparison_table(all_results: dict[str, dict]) -> pd.DataFrame:
 
 
 def plot_method_bars(table: pd.DataFrame, metrics: list, title: str):
-    """Methods on x; one point per evaluation and a larger one for both together.
+    """Methods on x; one point per evaluation and a larger one for all together.
 
     ``metrics`` = (column, label, chance) where chance is a number, a column name or None.
     Points, not bars, because the y axis is zoomed on the values.
@@ -568,7 +572,10 @@ def plot_method_bars(table: pd.DataFrame, metrics: list, title: str):
     fig, axes = plt.subplots(1, len(metrics), figsize=(5.4 * len(metrics), 4.8), constrained_layout=True)
     axes = np.atleast_1d(axes)
     fig.suptitle(title)
-    styles = {"Evaluación 0": ("o", 45, -0.18, 0.55), "Evaluación 1": ("s", 45, 0.0, 0.55), "Promedio eval 0 y 1": ("D", 110, 0.18, 1.0)}
+    markers = ("o", "s", "^")
+    step = 0.54 / len(SCOPES)
+    styles = {scope: (markers[i], 45, (i - (len(SCOPES) - 1) / 2) * step, 0.55) for i, scope in enumerate(SCOPES[:-1])}
+    styles[MEAN_SCOPE] = ("D", 110, (len(SCOPES) - 1) / 2 * step, 1.0)
     for ax, (column, label, chance) in zip(axes, metrics):
         values_all = []
         for scope, (marker, size, offset, alpha) in styles.items():
@@ -592,7 +599,7 @@ def plot_method_bars(table: pd.DataFrame, metrics: list, title: str):
     return fig
 
 
-def plot_event_boxes_all(all_results: dict[str, dict], measure: str, scope: str = "Promedio eval 0 y 1"):
+def plot_event_boxes_all(all_results: dict[str, dict], measure: str, scope: str = MEAN_SCOPE):
     """One panel per method: ``measure`` by event type, percentile within fold (0.5 = chance)."""
     methods = [m for m, r in all_results.items() if r["events"][measure].notna().any()]
     fig, axes = plt.subplots(1, len(methods), figsize=(3.2 * len(methods), 4.9), sharey=True, constrained_layout=True)
@@ -600,7 +607,7 @@ def plot_event_boxes_all(all_results: dict[str, dict], measure: str, scope: str 
     fig.suptitle(f"{measure} por tipo de evento — {scope} (percentil dentro del fold; línea = azar)")
     for ax, method in zip(axes, methods):
         events = all_results[method]["events"].copy()
-        if scope != "Promedio eval 0 y 1":
+        if scope != MEAN_SCOPE:
             events = events[events["evaluación"] == int(scope[-1])]
         events["percentil"] = events.groupby(["evaluación", "fold"])[measure].rank(pct=True)
         values = [events.loc[events["grupo"] == g, "percentil"].dropna().to_numpy() for g in GROUPS]
@@ -656,7 +663,7 @@ def plot_deferral_all(all_results: dict[str, dict]):
 
 
 def plot_decomposition_all(table: pd.DataFrame):
-    scope = "Promedio eval 0 y 1"
+    scope = MEAN_SCOPE
     methods = [m for m in dict.fromkeys(table.index.get_level_values(0)) if m != "SEED"]
     fig, ax = plt.subplots(figsize=(10, 4.8), constrained_layout=True)
     ale = [table.loc[(m, scope), "aleatoria (cerca de eventos)"] for m in methods]
@@ -668,7 +675,7 @@ def plot_decomposition_all(table: pd.DataFrame):
         ax.text(i, a + m + 0.004, f"{100 * m / (a + m):.1f}% epist.", ha="center", fontsize=9)
     ax.axhline(seed, ls="--", color=COLORS["SEED"], lw=1.2, label=f"SEED H(p) ({seed:.3f})")
     ax.set_xticks(range(len(methods)), methods)
-    ax.set(ylabel="Entropía media cerca de eventos [bits]", title="Descomposición de la incertidumbre — promedio eval 0 y 1")
+    ax.set(ylabel="Entropía media cerca de eventos [bits]", title=f"Descomposición de la incertidumbre — {MEAN_SCOPE.lower()}")
     ax.grid(axis="y", alpha=0.25)
     ax.legend(fontsize=8)
     return fig
@@ -676,7 +683,7 @@ def plot_decomposition_all(table: pd.DataFrame):
 
 def plot_rejection_all(all_results: dict[str, dict]):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6), constrained_layout=True)
-    fig.suptitle("Descartar automáticamente las detecciones con mayor MI (SEED: entropía) — promedio eval 0 y 1")
+    fig.suptitle(f"Descartar automáticamente las detecciones con mayor MI (SEED: entropía) — {MEAN_SCOPE.lower()}")
     for method, results in all_results.items():
         rejection = results["deferral"].dropna(subset=["% descartado"])
         measure = "epistémica (MI)" if (rejection["medida"] == "epistémica (MI)").any() else "SEED H(p)"
