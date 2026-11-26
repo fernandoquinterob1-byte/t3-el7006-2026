@@ -198,6 +198,48 @@ EXPERIMENTS: list[Experiment] = [
                    "típico. El límite del F1 es la **ambigüedad de los husos débiles en la anotación**.",
         loader=None,
     ),
+    Experiment(
+        key="Dinámica de incertidumbre",
+        title="Curvas de incertidumbre sobre la probabilidad, por duración y frente al SEED base",
+        notebook="15",
+        question="¿Cómo se mueve u(t) junto con p(t)? ¿Cambia la incertidumbre con la duración del huso? ¿La "
+                 "incertidumbre del DE y del NP es la misma que la del SEED base (suma cero) o rescata algo?",
+        what="Con los eventos del SEED base (TP, FN, FP y ventanas TN), se promedian las curvas de p y u alineadas al "
+             "inicio y fin de cada evento; se compara u por duración (corto < 0.6 s ≤ mediano < 0.9 s ≤ largo) y se "
+             "hacen pair plots de u SEED vs u del DE y MI del DE y NP, con AUROC de errores vs aciertos. Sin variantes "
+             "de F1.",
+        conclusion="La incertidumbre total es casi una copia de p; solo la MI tiene información propia. La duda se "
+                   "concentra en los **bordes** del huso (inicio y fin), y los eventos **cortos** son inciertos sean "
+                   "aciertos o errores. Para los **FP es suma cero**: la duda del SEED ya los separa (AUROC 0.88) y la "
+                   "MI no agrega. Para los **FN sí se rescata algo**: combinar u SEED con la MI del DE y del NP sube "
+                   "la AUROC FN vs TP de 0.62 a 0.71, también dentro de cada duración. Pero eso se mide sobre husos "
+                   "anotados; en el registro completo la señal se diluye en el fondo, por eso no subió el F1.",
+        loader=None,
+    ),
+    Experiment(
+        key="Fine-tuning con incertidumbre (piloto)",
+        title="Fine-tuning de SEED con pérdida pesada por incertidumbre (eval 0, fold 0)",
+        notebook="— (src/eeg_uq/uncertainty_finetune.py; resultados en outputs/uncertainty_finetune/)",
+        question="¿Usar la incertidumbre del Deep Ensemble para guiar un fine-tuning corto mejora la predicción de SEED?",
+        what="Desde el SEED original (semilla 42) se entrenan hasta 3 épocas con learning rate 1e-5. **F**: la pérdida de "
+             "cada instante pesa más donde la MI del DE es alta (hasta ×3) y menos donde la incertidumbre aleatoria es "
+             "alta (hasta ×0.5). **A (control)**: el mismo fine-tuning con pesos 1. La época se elige con el F1 de "
+             "validación; test se mide una vez. A se repite con 4 semillas de entrenamiento (42, 1, 2, 3; cambia "
+             "el orden de los batches, el punto de partida es el mismo). Solo un fold: no entra en la tabla comparativa.",
+        conclusion="Test F1: SEED original 82.32 → **F 82.89** (+0.57). **A** con 4 semillas: 83.33 / 83.97 / 83.33 / "
+                   "84.09, media **83.68** (+1.36), y las 4 superan al SEED original y al mejor de los 5 SEED "
+                   "reentrenados (81.84–83.53). Unas pocas épocas más a learning rate bajo sí ayudan de forma "
+                   "consistente en este fold (sobre todo bajan los FP: 279 → ~170–220). La variante con incertidumbre "
+                   "queda **por debajo de las 4 semillas de A**: subir el peso de las zonas con MI alta empuja a "
+                   "detectar más (recall 88%, FP 247) y pierde precisión. Con estos pesos, la incertidumbre no ayuda "
+                   "al fine-tuning. **Extensión a la eval 0 completa (A, semilla 42, folds 0–4)**: test F1 "
+                   "82.32→83.33, 81.76→81.15, 83.05→83.35, 83.08→83.64, 81.73→82.80; media SEED **82.39 → A 82.85** "
+                   "(+0.46, mejora en 4 de 5 folds). Pero la media de los 5 SEED reentrenados es 82.91: el fine-tuning "
+                   "deja al modelo en un nivel típico de reentrenar, no por encima. El fold 0 fue el caso más "
+                   "favorable. El fine-tuning tiende a equilibrar precisión y recall (en folds con precisión alta, "
+                   "la baja y sube el recall; en folds con recall alto, al revés).",
+        loader=None,
+    ),
 ]
 
 
